@@ -35,8 +35,8 @@ class Scale(nn.Module):
         self.device = (('cuda' if torch.cuda.is_available() else
                       'mps' if torch.backends.mps.is_available() else 'cpu')
                       if device is None else device)
-        self.scale = scale
         self.init = init
+        self.scale = scale
         self.s = nn.Parameter(torch.ones(heads, dim, device=self.device) * scale)
             # heads == 1 gives us a single regular vector
             # heads > 1 gets used in attention mechanism for different scaling vector for each head
@@ -302,7 +302,7 @@ class Layer(nn.Module):
         ### attention connection
         self.attn = SelfAttention(cfg.dim, cfg.num_heads, self.device)
         # eigen learning rate vector
-        self.a_A = Scale(cfg.dim, device=self.device)#, scale = 1. / math.sqrt(cfg.dim)
+        self.alpha_A = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)#, scale = 1. / math.sqrt(cfg.dim)
             # not sure what scale to use with a_A and a_M. At one point i had it as 1./math.sqrt(cfg.dim)
             # but now i can't find the reference to that in the paper
 
@@ -311,7 +311,7 @@ class Layer(nn.Module):
         mult = cfg.mlp_hidden_mult * 2/3
         self.mlp = MLP(cfg.dim, int(cfg.dim * mult),  cfg.dim, self.device)
         # eigen learning rate vector
-        self.a_M = Scale(cfg.dim, device=self.device)#, scale = 1. / math.sqrt(cfg.dim)
+        self.alpha_M = Scale(cfg.dim, device=self.device)#, scale = 1. / math.sqrt(cfg.dim)
 
     def forward(self, h: torch.Tensor, freqs: dict, mask: torch.Tensor) -> torch.Tensor:
         """
@@ -326,9 +326,9 @@ class Layer(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
         """
         h_A = cosine_norm(self.attn(h, freqs, mask))
-        h = cosine_norm(h + self.a_A() * (h_A - h))
+        h = cosine_norm(h + self.alpha_A() * (h_A - h))
         h_M = cosine_norm(self.mlp(h))
-        h = cosine_norm(h + self.a_M() * (h_M - h))
+        h = cosine_norm(h + self.alpha_M() * (h_M - h))
         return h
 
 class Model(nn.Module):
