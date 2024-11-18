@@ -59,8 +59,8 @@ class TrainConfig:
 
     ### Learning Rate Schedule
     # Maximum and minimum learning rates during annealing
-    lr_init: float = 1e-2 # N-GPT does NOT use learning rate warmup
-    lr_final: float = 1e-6
+    lr_init: float = 5e-4 # N-GPT does NOT use learning rate warmup
+    lr_final: float = 1e-8
 
     def __post_init__(self):
         """

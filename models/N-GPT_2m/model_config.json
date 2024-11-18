@@ -1,0 +1,1 @@
+{"dim": 128, "device": null, "max_seq_len": 384, "theta": 10000, "vocab_len": 2048, "num_layers": 8, "num_heads": 4, "mlp_hidden_mult": 4}

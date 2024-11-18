@@ -1,0 +1,1 @@
+{"model_name": "N-GPT_2m", "micro_batch_size": 4, "grad_accum_steps": 16, "max_iters": 1000, "eval_interval": 100, "beta1": 0.9, "beta2": 0.95, "epsilon": 1e-08, "lr_init": 0.0005, "lr_final": 1e-08}

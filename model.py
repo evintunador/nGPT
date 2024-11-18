@@ -302,7 +302,7 @@ class Layer(nn.Module):
         ### attention connection
         self.attn = SelfAttention(cfg.dim, cfg.num_heads, self.device)
         # eigen learning rate vector
-        self.alpha_A = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)#, scale = 1. / math.sqrt(cfg.dim)
+        self.alpha_A = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
             # not sure what scale to use with a_A and a_M. At one point i had it as 1./math.sqrt(cfg.dim)
             # but now i can't find the reference to that in the paper
 
@@ -311,8 +311,8 @@ class Layer(nn.Module):
         mult = cfg.mlp_hidden_mult * 2/3
         self.mlp = MLP(cfg.dim, int(cfg.dim * mult),  cfg.dim, self.device)
         # eigen learning rate vector
-        self.alpha_M = Scale(cfg.dim, device=self.device)#, scale = 1. / math.sqrt(cfg.dim)
-
+        self.alpha_M = Scale(cfg.dim, init = 0.05, scale = 1. / math.sqrt(cfg.dim), device=self.device)
+        
     def forward(self, h: torch.Tensor, freqs: dict, mask: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the Layer module.
@@ -414,8 +414,8 @@ class Model(nn.Module):
         """
         # Enforce absolute value on eigen learning rates
         for layer in self.layers:
-            layer.a_A.s.data.abs_()
-            layer.a_M.s.data.abs_()
+            layer.alpha_A.s.data.abs_()
+            layer.alpha_M.s.data.abs_()
         
         # Cosine normalize relevant Linear layers
         for module in self.modules():
