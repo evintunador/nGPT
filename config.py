@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional, Tuple
 import torch
 import time
 
@@ -8,10 +7,10 @@ class ModelConfig:
     """
     Design your N-GPT here
     """
-    dim: int = 96
-    device: str = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu' 
+    dim: int = 128
+    device: str = None
         # defaults to best available GPU/CPU
-    max_seq_len: int = 256 # 512 is the most my 8gb of ram can handle
+    max_seq_len: int = 384 # 512 is the most my 8gb of ram can handle
     theta: float = 10_000 # RoPE hyperparameter; 10_000 is the most common choice
     vocab_len: int = 2048 # options are 512, 1024, 2048
     num_layers: int = 8
@@ -37,31 +36,31 @@ class TrainConfig:
     Design your training loop here
     """
     # name of the folder the model will be saved into
-    model_name: str = f'N-GPT_1m'#{time.strftime("%Y-%m-%d|%H-%M-%S")}' # defaults to the time that config.py was imported
+    model_name: str = f'N-GPT_2m'
 
     ### batch size hyperparams
     # micro_batch_size * grad_accum_steps = effective batch size
     # micro_batch_size * grad_accum_steps * max_seq_len = total number of tokens per batch
-    micro_batch_size: int = 16
-    grad_accum_steps: int = 4
+    micro_batch_size: int = 4
+    grad_accum_steps: int = 16
         # set grad_accum_steps = 1 to not do gradient accumulation
 
     ### training length
     # total number of batches to run over the course of training
     max_iters: int = 1000 # we'll refer to iterations of batches instead of epochs over the dataset
     # how often to print out an update on how training is going
-    eval_interval: int = 50 #max_iters // 100 # doing this too often slows things down hella but also gives detailed log data
+    eval_interval: int = 100
     
     ### AdamW Hyperparameters https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html
     beta1: float = 0.9
     beta2: float = 0.95
     epsilon: float = 1e-8
-    # and N-GPT disables weight-decay in the optimizer
+    # and N-GPT disables weight-decay in the optimizer because it would pull values off of the unit-hypersphere
 
     ### Learning Rate Schedule
     # Maximum and minimum learning rates during annealing
-    lr_init: float = 5e-3 # N-GPT does NOT use learning rate warmup
-    lr_final: float = 1e-5
+    lr_init: float = 1e-2 # N-GPT does NOT use learning rate warmup
+    lr_final: float = 1e-6
 
     def __post_init__(self):
         """

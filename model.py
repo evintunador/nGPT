@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
     """
-    Cosine normalization function.
+    Places vectors onto the unit-hypersphere
 
     Args:
         x (torch.Tensor): Input tensor.
@@ -19,6 +19,32 @@ def cosine_norm(x: torch.Tensor, dim=-1) -> torch.Tensor:
     # divide by the magnitude to place on the unit hypersphere
     return x / norm
 
+class Scale(nn.Module):
+    """
+    A module that manages learnable scaling parameters to ensure different learning rates
+    from the rest of the parameters in the model (see pages 5 and 19)
+    
+    Args:
+        dim (int): Dimension of the scaling parameter
+        scale (float): Initial scale value
+        init (float): Initial value for the scaling parameter
+        device (str, optional): Device to store the parameter on
+    """
+    def __init__(self, dim: int, heads: int = 1, scale: float = 1.0, init: float = 1.0, device=None):
+        super().__init__()
+        self.device = (('cuda' if torch.cuda.is_available() else
+                      'mps' if torch.backends.mps.is_available() else 'cpu')
+                      if device is None else device)
+        self.scale = scale
+        self.init = init
+        self.s = nn.Parameter(torch.ones(heads, dim, device=self.device) * scale)
+            # heads == 1 gives us a single regular vector
+            # heads > 1 gets used in attention mechanism for different scaling vector for each head
+    
+    def forward(self):
+        """Compute the effective scaling factor."""
+        return self.s * (self.init / self.scale) # shape (heads, dim)
+    
 class PrecomputeRotaryFrequencies(nn.Module):
     """
     This class precomputes the RoPE frequencies based on the expected `max_seq_len` and `head_dim`.
@@ -100,9 +126,7 @@ class SelfAttention(nn.Module):
         self.Wv = nn.Linear(dim, num_heads * self.head_dim, bias=False, device=self.device)
 
         # the scaling factor to apply to the normalized queries & keys (see page 4)
-        self.s_qk_scale = 1 / math.sqrt(dim)
-        self.s_qk_init = 1. # for explanations of the scale & init, see pages 5 & 19
-        self.s_qk = nn.Parameter(torch.ones(num_heads, self.head_dim, device=self.device) * self.s_qk_scale)
+        self.s_qk = Scale(self.head_dim, heads=num_heads, scale = 1. / math.sqrt(dim), device=self.device)
 
         # the scaling factor to apply to the attention logits to restore a variance of 1 (see page 4)
         self.scale = self.head_dim ** 0.5
@@ -146,9 +170,9 @@ class SelfAttention(nn.Module):
         k = self.apply_rotary_pos_emb(k, sin, cos)
 
         # normalizing & scaling our queries  & keys (see page 4)
-        effective_s_qk = self.s_qk * (self.s_qk_init / self.s_qk_scale) # (head_dim)
-        q = cosine_norm(q) * effective_s_qk # then scale each head
-        k = cosine_norm(k) * effective_s_qk # no shape change
+        s_qk = self.s_qk() # (num_heads, head_dim)
+        q = cosine_norm(q) * s_qk # then scale each head
+        k = cosine_norm(k) * s_qk # no shape change
 
         # Transpose for attention computation
         q = q.transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
@@ -232,12 +256,8 @@ class MLP(nn.Module):
         self.Wdown.GPT_scale_init = 1 
 
         # the learnable scaling factors
-        self.s_u_scale = 1. # for explanations of the scale & init, see pages 5 & 19
-        self.s_u_init = 1.
-        self.s_u = nn.Parameter(torch.ones(hidden_dim, device=self.device) * self.s_u_scale)
-        self.s_v_scale = 1.
-        self.s_v_init = 1.
-        self.s_v = nn.Parameter(torch.ones(hidden_dim, device=self.device) * self.s_v_scale)
+        self.s_u = Scale(hidden_dim, device=device)
+        self.s_v = Scale(hidden_dim, device=device)
 
         # the varaince-controlling scaling term, needed to benefit from SiLU (see appendix A.1)
         self.scale = math.sqrt(input_dim)
@@ -256,10 +276,8 @@ class MLP(nn.Module):
         u = self.Wup(x) # (batch_size, seq_len, hidden_dim)
         v = self.Wgate(x)
         # scale them
-        effective_s_u = self.s_u * (self.s_u_init / self.s_u_scale) # (hidden_dim)
-        effective_s_v = self.s_v * (self.s_v_init / self.s_v_scale)
-        u = u * effective_s_u # no shape change
-        v = v * effective_s_v * self.scale 
+        u = u * self.s_u()
+        v = v * self.s_v() * self.scale 
         # now perform the nonlinearity gate
         hidden = u * F.silu(v) # (batch_size, seq_len, hidden_dim)
         return self.Wdown(hidden) # (batch_size, seq_len, output_dim)
@@ -284,18 +302,16 @@ class Layer(nn.Module):
         ### attention connection
         self.attn = SelfAttention(cfg.dim, cfg.num_heads, self.device)
         # eigen learning rate vector
-        self.a_A_scale = 1. / math.sqrt(cfg.dim)
-        self.a_A_init = 1. # for explanations of the scale & init, see page 5
-        self.a_A = nn.Parameter(torch.ones(cfg.dim, device=self.device) * self.a_A_scale)
+        self.a_A = Scale(cfg.dim, device=self.device)#, scale = 1. / math.sqrt(cfg.dim)
+            # not sure what scale to use with a_A and a_M. At one point i had it as 1./math.sqrt(cfg.dim)
+            # but now i can't find the reference to that in the paper
 
         ### feedforward connection
         # ensures mlp_hidden_mult maintains the same parameter count as if we were using a not-gated MLP
         mult = cfg.mlp_hidden_mult * 2/3
         self.mlp = MLP(cfg.dim, int(cfg.dim * mult),  cfg.dim, self.device)
         # eigen learning rate vector
-        self.a_M_scale = 1. / math.sqrt(cfg.dim)
-        self.a_M_init = 1. # for explanations of the scale & init, see page 5
-        self.a_M = nn.Parameter(torch.ones(cfg.dim, device=self.device) * self.a_M_scale)
+        self.a_M = Scale(cfg.dim, device=self.device)#, scale = 1. / math.sqrt(cfg.dim)
 
     def forward(self, h: torch.Tensor, freqs: dict, mask: torch.Tensor) -> torch.Tensor:
         """
@@ -310,9 +326,9 @@ class Layer(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, seq_len, dim).
         """
         h_A = cosine_norm(self.attn(h, freqs, mask))
-        h = cosine_norm(h + self.a_A * (h_A - h))
+        h = cosine_norm(h + self.a_A() * (h_A - h))
         h_M = cosine_norm(self.mlp(h))
-        h = cosine_norm(h + self.a_M * (h_M - h))
+        h = cosine_norm(h + self.a_M() * (h_M - h))
         return h
 
 class Model(nn.Module):
@@ -328,7 +344,7 @@ class Model(nn.Module):
 
         ### positional encodings
         self.precompute_freqs = PrecomputeRotaryFrequencies(cfg.dim // cfg.num_heads, cfg.max_seq_len, cfg.theta, self.device)
-        
+
         # residual state initialization
         self.token_embedder = nn.Embedding(self.vocab_len, cfg.dim, device=self.device)
 
@@ -342,9 +358,7 @@ class Model(nn.Module):
         # the output projection
         self.output = nn.Linear(cfg.dim, self.vocab_len, bias=False, device=self.device)
         # scaling param to un-limit the range for the final probability distribution (see page 2)
-        self.s_z_scale = 1 / math.sqrt(self.dim)
-        self.s_z_init = 1. # for explanations of the scale & init, see pages 5 & 19
-        self.s_z = nn.Parameter(torch.ones(self.vocab_len, device=self.device) * self.s_z_scale)
+        self.s_z = Scale(self.vocab_len, scale = 1./math.sqrt(self.dim), device=self.device)
 
         # loss function
         self.criterion = nn.CrossEntropyLoss(ignore_index = self.vocab_len -1) # ignore the padding token
@@ -376,6 +390,37 @@ class Model(nn.Module):
         # the embedding matrix doesn't count as an nn.Linear so we've gotta do it again for that
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
+    
+    def normalize_linear(self, module):
+        """
+        Helper method to normalize Linear layer weights where one dimension matches model dim
+        """
+        # Find the dimension that matches cfg.dim
+        dim_to_normalize = None
+        for dim, size in enumerate(module.weight.shape):
+            if size == self.dim:
+                dim_to_normalize = dim
+                break
+        
+        if dim_to_normalize is not None:
+            # Normalize the weights
+            module.weight.data = cosine_norm(module.weight.data, dim=dim_to_normalize)
+
+    def enforce_constraints(self):
+        """
+        Enforces constraints after each optimization step:
+        1. Absolute value constraint on eigen learning rate parameters
+        2. Cosine normalization on Linear layer weights where one dimension matches model dim
+        """
+        # Enforce absolute value on eigen learning rates
+        for layer in self.layers:
+            layer.a_A.s.data.abs_()
+            layer.a_M.s.data.abs_()
+        
+        # Cosine normalize relevant Linear layers
+        for module in self.modules():
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                self.normalize_linear(module)
 
     def get_num_params(self):
         """
@@ -418,8 +463,7 @@ class Model(nn.Module):
         # the final output of the model
         logits = self.output(x) # (batch_size, seq_len, vocab_len)
         # to un-limit the temperature of the final probability distribution (see page 2)
-        effective_s_z = self.s_z * (self.s_z_init / self.s_z_scale) # (dim)
-        scaled_logits = logits * effective_s_z
+        scaled_logits = logits * self.s_z()
         
         loss = None
         if target_token_ids is not None: # if we're training, calculate the loss
